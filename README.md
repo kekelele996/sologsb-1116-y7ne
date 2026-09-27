@@ -59,26 +59,33 @@ sologsb-1116/
 │   ├── nginx.conf              # try_files 前端路由回落 + gzip
 │   ├── public/favicon.svg
 │   └── src/
-│       ├── types/              # record.ts / spore.ts / point.ts / identify.ts / index.ts
-│       ├── stores/             # recordStore / sporeStore / pointStore / identifyStore（Zustand）
-│       ├── components/common/  # SporePrintSwatch / TraitsSummary / GillAttachmentTag / GeoPointForm
+│       ├── types/              # record.ts / spore.ts / point.ts / segment.ts / identify.ts / index.ts
+│       ├── stores/             # recordStore / sporeStore / pointStore / segmentStore / identifyStore（Zustand）
+│       ├── components/common/  # SporePrintSwatch / TraitsSummary / GillAttachmentTag / GeoPointForm / SegmentPanel
 │       ├── hooks/              # usePersistentStore / useCandidateMatch
 │       ├── pages/              # AtlasPage / RecordDetailPage / PointsPage / IdentifyPage / ComparePage
 │       ├── router/index.ts
-│       └── utils/              # spore.ts / export.ts / id.ts
+│       └── utils/              # spore.ts / export.ts / id.ts / segment.ts
 ```
 
 ## 五、数据模型与存储
 
 | 模型 | 说明 | Dexie 表 |
 | --- | --- | --- |
-| FungusRecord 菌物条目 | 采集编号、暂定名、菌盖（直径/形状/边缘/质地）、菌肉厚度与变色反应、着生方式、菌褶密度、菌柄、菌环菌托、气味、关联树种 | `records` |
+| FungusRecord 菌物条目 | 采集编号（按编号段自动领取）、暂定名、菌盖（直径/形状/边缘/质地）、菌肉厚度与变色反应、着生方式、菌褶密度、菌柄、菌环菌托、气味、关联树种 | `records` |
 | SporePrint 孢子印 | 印色、印形、获取时长、观察日期、样本干湿度 | `spores` |
 | CollectPoint 采集点 | 地点名、经纬度、海拔、植被类型、基物、伴生树种、日期、采集人 | `points` |
+| CodeSegment 编号段 | 所属采集点、前缀、起止序号、补零宽度、已发序号、状态（发号中/已停用/已退回） | `segments` |
 | IdentifyLog 鉴定结论 | 结论学名、依据、参考图鉴与页码、置信度、是否待复核、复核人 | `identifies` |
 
 - 数据库名 `gbfungiguide`，`meta` 表保存 `schemaVersion`；
 - `version(2)` 升级迁移会为历史条目补齐「菌肉变色反应」默认值（不变色）；
+- `version(3)` 新增编号段表，老编号按「前缀 + 序号」自动补建为编号段并回填条目的 `segmentId`：历史已发号不回收，段内空号仍可继续顺序领取；
+- 编号段规则：
+  - 出发前登记前缀与起止号，同一前缀的区间不能重叠（已退回的段不占号）；
+  - 新建条目在一个 Dexie 事务内领号：按段登记先后取「发号中且未领完」的段，发放段内最小空号；
+  - 已发出的号保存在段的 `issuedNumbers` 中，条目作废（删除）后**号也不回收、不再发放**；
+  - 已停用、已领完、已退回的段不再发号；零发出的段可以**整段退回**，退回后同前缀可重新登记新段；
 - 数据仅存于浏览器本地，容器无状态、不挂载命名卷。
 
 ## 六、主要页面
@@ -87,7 +94,7 @@ sologsb-1116/
 | --- | --- |
 | `/atlas` | 图谱总览：网格卡片展示菌盖形态要点、孢子印色块与鉴定状态，按印色/着生方式筛选并新建条目 |
 | `/atlas/:id` | 条目详情：形态描述分区折叠、孢子印观察登记、采集点编辑（含坐标校验）、鉴定留痕 |
-| `/points` | 采集点管理：经纬度格式校验、条目数与主要基物统计、删除前校验下级条目 |
+| `/points` | 采集点管理：经纬度格式校验、编号段登记（前缀/起止号/同前缀重叠校验）、领用进度条与已用/剩余统计、停用启用、未用段整段退回、删除前校验下级条目与编号段 |
 | `/identify` | 鉴定工作页：左侧勾选形态特征与印色，右侧实时给出候选名录排序，确认后落鉴定结论 |
 | `/compare` | 条目对比：并排最多 3 条，逐项对照菌盖/菌褶菌管/孢子印差异并高亮 |
 

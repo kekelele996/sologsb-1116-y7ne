@@ -1,26 +1,27 @@
 import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
-import type { CollectPoint, FungusRecord, IdentifyLog, SporePrint } from '@/types'
+import type { CodeSegment, CollectPoint, FungusRecord, IdentifyLog, SporePrint } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 四张表 + 元数据表 */
-class FungiGuideDb extends Dexie {
+/** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 / 编号段 五张表 + 元数据表 */
+export class FungiGuideDb extends Dexie {
   records!: Table<FungusRecord, string>
   spores!: Table<SporePrint, string>
   points!: Table<CollectPoint, string>
   identifies!: Table<IdentifyLog, string>
+  segments!: Table<CodeSegment, string>
   meta!: Table<MetaRow, string>
 
-  constructor() {
-    super('gbfungiguide')
+  constructor(name = 'gbfungiguide') {
+    super(name)
     this.version(1).stores({
       records: 'id, code, pointId, attachment',
       spores: 'id, recordId, color',
@@ -29,7 +30,7 @@ class FungiGuideDb extends Dexie {
       meta: 'key'
     })
     // v2：新增「菌肉变色反应」字段，迁移时为历史条目补齐默认值（不变色）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         records: 'id, code, pointId, attachment, capShape',
         spores: 'id, recordId, color, observeDate',
@@ -46,6 +47,87 @@ class FungiGuideDb extends Dexie {
               record.fleshReaction = '不变色'
             }
           })
+      })
+    // v3：新增编号段表 segments，老编号按「前缀 + 序号」补建为段（已发号不回收，空号仍可领），并回填 segmentId
+    this.version(SCHEMA_VERSION)
+      .stores({
+        records: 'id, code, pointId, attachment, capShape, segmentId',
+        spores: 'id, recordId, color, observeDate',
+        points: 'id, name, substrate, vegetation',
+        identifies: 'id, recordId, conclusion, date',
+        segments: 'id, pointId, status',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        interface LegacySegment {
+          id: string
+          pointId: string
+          prefix: string
+          start: number
+          end: number
+          padWidth: number
+          issuedNumbers: number[]
+          status: 'active'
+          createdAt: string
+          note: string
+        }
+        /** 由「采集点 + 前缀」派生确定性段 ID，modify 阶段按同一规则回填 segmentId */
+        const legacyId = (pointId: string, prefix: string): string =>
+          `seg_legacy_${pointId}_${prefix}`.replace(/[^a-zA-Z0-9]+/g, '_')
+        const groups = new Map<
+          string,
+          { pointId: string; prefix: string; numbers: number[]; width: number }
+        >()
+        await tx
+          .table<FungusRecord, string>('records')
+          .toCollection()
+          .each((record) => {
+            const dash = record.code.lastIndexOf('-')
+            if (dash < 0 || dash === record.code.length - 1) return
+            const prefix = record.code.slice(0, dash + 1)
+            const n = Number(record.code.slice(dash + 1))
+            if (!Number.isInteger(n) || n <= 0) return
+            const key = `${record.pointId} ${prefix}`
+            const width = Math.max(3, record.code.slice(dash + 1).length)
+            const group = groups.get(key) ?? {
+              pointId: record.pointId,
+              prefix,
+              numbers: [],
+              width: 3
+            }
+            group.numbers.push(n)
+            group.width = Math.max(group.width, width)
+            groups.set(key, group)
+          })
+        const migratedAt = new Date().toISOString()
+        const legacy: LegacySegment[] = []
+        groups.forEach((group) => {
+          const numbers = [...new Set(group.numbers)].sort((a, b) => a - b)
+          legacy.push({
+            id: legacyId(group.pointId, group.prefix),
+            pointId: group.pointId,
+            prefix: group.prefix,
+            start: numbers[0],
+            end: numbers[numbers.length - 1],
+            padWidth: Math.max(group.width, String(numbers[numbers.length - 1]).length),
+            issuedNumbers: numbers,
+            status: 'active',
+            createdAt: migratedAt,
+            note: '由历史编号自动补建'
+          })
+        })
+        if (legacy.length > 0) {
+          await tx.table<CodeSegment, string>('segments').bulkPut(legacy)
+          await tx
+            .table<FungusRecord, string>('records')
+            .toCollection()
+            .modify((record) => {
+              const dash = record.code.lastIndexOf('-')
+              if (dash < 0 || dash === record.code.length - 1) return
+              const segId = legacyId(record.pointId, record.code.slice(0, dash + 1))
+              if (legacy.some((seg) => seg.id === segId)) record.segmentId = segId
+            })
+        }
       })
   }
 }
@@ -116,10 +198,38 @@ export async function seedDemoData(): Promise<void> {
     }
   ])
 
+  await db.segments.bulkPut([
+    {
+      id: 'seg_bhs_demo',
+      pointId: 'pt_bhs',
+      prefix: 'BHS-2026-',
+      start: 1,
+      end: 50,
+      padWidth: 3,
+      issuedNumbers: [1, 2],
+      status: 'active',
+      createdAt: today,
+      note: '百花山秋季样线领用段'
+    },
+    {
+      id: 'seg_yls_demo',
+      pointId: 'pt_yls',
+      prefix: 'YLS-2026-',
+      start: 1,
+      end: 30,
+      padWidth: 3,
+      issuedNumbers: [1],
+      status: 'active',
+      createdAt: today,
+      note: '云龙山腐木沟领用段'
+    }
+  ])
+
   await db.records.bulkPut([
     {
       id: 'rec_001',
       code: 'BHS-2026-001',
+      segmentId: 'seg_bhs_demo',
       tempName: '橙黄牛肝菌（暂定）',
       fruitBodyCount: 3,
       pointId: 'pt_bhs',
@@ -144,6 +254,7 @@ export async function seedDemoData(): Promise<void> {
     {
       id: 'rec_002',
       code: 'BHS-2026-002',
+      segmentId: 'seg_bhs_demo',
       tempName: '灰紫小伞（暂定）',
       fruitBodyCount: 6,
       pointId: 'pt_bhs',
@@ -168,6 +279,7 @@ export async function seedDemoData(): Promise<void> {
     {
       id: 'rec_003',
       code: 'YLS-2026-001',
+      segmentId: 'seg_yls_demo',
       tempName: '褐褶韧革菌（暂定）',
       fruitBodyCount: 2,
       pointId: 'pt_yls',

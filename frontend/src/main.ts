@@ -10,12 +10,14 @@ import { recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
 import { identifyStore } from '@/stores/identifyStore'
+import { segmentStore } from '@/stores/segmentStore'
 import '@/styles/main.css'
 
 async function bootstrap(): Promise<void> {
   await seedDemoData()
   await stampDbVersion()
   await pointStore.getState().hydrate()
+  await segmentStore.getState().hydrate()
   await recordStore.getState().hydrate()
   await sporeStore.getState().hydrate()
   await identifyStore.getState().hydrate()

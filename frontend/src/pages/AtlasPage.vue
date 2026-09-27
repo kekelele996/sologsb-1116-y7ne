@@ -19,17 +19,19 @@ import SporePrintSwatch from '@/components/common/SporePrintSwatch.vue'
 import TraitsSummary from '@/components/common/TraitsSummary.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { useCandidateMatch, EMPTY_CRITERIA, type MatchCriteria } from '@/hooks/useCandidateMatch'
-import { recordStore } from '@/stores/recordStore'
+import { NoAvailableSegmentError, recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
 import { identifyStore } from '@/stores/identifyStore'
-import { uid } from '@/utils/id'
+import { segmentStore } from '@/stores/segmentStore'
+import { formatSegmentCode, pickIssue } from '@/utils/segment'
 
 const router = useRouter()
 const recordState = useStore(recordStore)
 const sporeState = useStore(sporeStore)
 const pointState = useStore(pointStore)
 const identifyState = useStore(identifyStore)
+const segmentState = useStore(segmentStore)
 
 const filterAttachment = ref<GillAttachment | ''>('')
 const filterColor = ref<SporeColor | ''>('')
@@ -99,10 +101,9 @@ function goCompare(): void {
   void router.push({ path: '/compare', query: { ids: compareIds.value.join(',') } })
 }
 
-/* ---------- 新建条目 ---------- */
+/* ---------- 新建条目（按编号段领号） ---------- */
 const dialogVisible = ref(false)
 const form = reactive({
-  code: '',
   tempName: '',
   pointId: '',
   fruitBodyCount: 1,
@@ -133,64 +134,70 @@ watch(
   { immediate: true }
 )
 
+/** 当前采集点本次将领取的编号（与发号规则一致：按登记先后取段、段内最小空号） */
+const allocation = computed(() => {
+  if (!form.pointId) return null
+  const segs = segmentState.segments.filter((seg) => seg.pointId === form.pointId)
+  return pickIssue(segs)
+})
+
 function openCreate(): void {
-  form.code = `REC-${String(recordState.records.length + 1).padStart(3, '0')}`
   form.tempName = ''
   form.note = ''
   dialogVisible.value = true
 }
 
 async function submit(): Promise<void> {
-  if (!form.code.trim()) {
-    ElMessage.warning('请填写采集编号')
-    return
-  }
   if (!form.pointId) {
     ElMessage.warning('请选择采集点')
     return
   }
-  if (recordState.records.some((item) => item.code === form.code.trim())) {
-    ElMessage.warning(`采集编号「${form.code}」已存在，请换一个`)
+  if (!allocation.value) {
+    ElMessage.warning('该采集点没有可发号的编号段（未登记、已停用或已领完），请先在采集点管理登记')
     return
   }
-  const record: FungusRecord = {
-    id: uid('rec'),
-    code: form.code.trim(),
-    tempName: form.tempName.trim(),
-    fruitBodyCount: Number(form.fruitBodyCount) || 1,
-    pointId: form.pointId,
-    capDiameter: Number(form.capDiameter) || 0,
-    capShape: form.capShape,
-    capMargin: form.capMargin,
-    capTexture: form.capTexture,
-    fleshThickness: Number(form.fleshThickness) || 0,
-    fleshReaction: form.fleshReaction,
-    attachment: form.attachment,
-    gillDensity: form.gillDensity,
-    stipeLength: Number(form.stipeLength) || 0,
-    stipeDiameter: Number(form.stipeDiameter) || 0,
-    ring: form.ring,
-    volva: form.volva,
-    odor: form.odor.trim(),
-    hostTree: form.hostTree.trim(),
-    collectDate: form.collectDate,
-    collector: form.collector.trim(),
-    note: form.note.trim()
+  try {
+    const record = await recordStore.getState().createWithSegment({
+      tempName: form.tempName.trim(),
+      fruitBodyCount: Number(form.fruitBodyCount) || 1,
+      pointId: form.pointId,
+      capDiameter: Number(form.capDiameter) || 0,
+      capShape: form.capShape,
+      capMargin: form.capMargin,
+      capTexture: form.capTexture,
+      fleshThickness: Number(form.fleshThickness) || 0,
+      fleshReaction: form.fleshReaction,
+      attachment: form.attachment,
+      gillDensity: form.gillDensity,
+      stipeLength: Number(form.stipeLength) || 0,
+      stipeDiameter: Number(form.stipeDiameter) || 0,
+      ring: form.ring,
+      volva: form.volva,
+      odor: form.odor.trim(),
+      hostTree: form.hostTree.trim(),
+      collectDate: form.collectDate,
+      collector: form.collector.trim(),
+      note: form.note.trim()
+    })
+    dialogVisible.value = false
+    ElMessage.success(`条目 ${record.code} 已建立，编号按段内顺序领取`)
+  } catch (err) {
+    if (err instanceof NoAvailableSegmentError) ElMessage.warning(err.message)
+    else throw err
   }
-  await recordStore.getState().save(record)
-  dialogVisible.value = false
-  ElMessage.success(`条目 ${record.code} 已建立`)
 }
 
 async function removeRecord(record: FungusRecord): Promise<void> {
-  await ElMessageBox.confirm(`确认删除条目「${record.code}」？其孢子印与鉴定留痕一并清理`, '删除确认', {
-    type: 'warning'
-  })
+  await ElMessageBox.confirm(
+    `确认作废条目「${record.code}」？其孢子印与鉴定留痕一并清理；纸质编号已发出，不会再次发放。`,
+    '作废确认',
+    { type: 'warning' }
+  )
   await sporeStore.getState().removeByRecord(record.id)
   const logs = identifyState.logs.filter((item) => item.recordId === record.id)
   await Promise.all(logs.map((item) => identifyStore.getState().remove(item.id)))
   await recordStore.getState().remove(record.id)
-  ElMessage.success('条目已删除')
+  ElMessage.success('条目已作废，编号不回收')
 }
 </script>
 
@@ -272,7 +279,7 @@ async function removeRecord(record: FungusRecord): Promise<void> {
           >
             {{ compareIds.includes(item.record.id) ? '已加入对比' : '加入对比' }}
           </el-button>
-          <el-button size="small" type="danger" plain @click="removeRecord(item.record)">删除</el-button>
+          <el-button size="small" type="danger" plain @click="removeRecord(item.record)">作废</el-button>
         </div>
       </el-card>
       <el-empty v-if="visible.length === 0" description="没有命中的条目，调整筛选条件或新建条目" />
@@ -283,7 +290,21 @@ async function removeRecord(record: FungusRecord): Promise<void> {
         <el-row :gutter="12">
           <el-col :span="12">
             <el-form-item label="采集编号" required>
-              <el-input v-model="form.code" placeholder="如 BHS-2026-003" />
+              <div v-if="allocation" class="alloc-box">
+                <el-tag type="success" effect="dark" class="mono alloc-code">
+                  {{ formatSegmentCode(allocation.segment, allocation.number) }}
+                </el-tag>
+                <span class="muted">
+                  自动领取 · 段内第 {{ allocation.segment.issuedNumbers.length + 1 }} 号
+                </span>
+              </div>
+              <el-alert
+                v-else
+                type="warning"
+                :closable="false"
+                show-icon
+                title="该采集点没有可发号的编号段（未登记、已停用或已领完），请先到「采集点管理」登记编号段"
+              />
             </el-form-item>
           </el-col>
           <el-col :span="12">
@@ -418,7 +439,7 @@ async function removeRecord(record: FungusRecord): Promise<void> {
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submit">保存条目</el-button>
+        <el-button type="primary" :disabled="!allocation" @click="submit">保存条目</el-button>
       </template>
     </el-dialog>
   </div>
@@ -467,5 +488,14 @@ async function removeRecord(record: FungusRecord): Promise<void> {
 .card-actions {
   display: flex;
   gap: 8px;
+}
+.alloc-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.alloc-code {
+  align-self: flex-start;
+  font-size: 14px;
 }
 </style>

@@ -35,6 +35,8 @@ export interface FungusRecord {
   id: string
   /** 采集编号 */
   code: string
+  /** 发号编号段（历史手工编号条目可能为空） */
+  segmentId?: string
   /** 暂定名 */
   tempName: string
   /** 子实体数量 */

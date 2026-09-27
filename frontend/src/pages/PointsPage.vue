@@ -3,13 +3,16 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { CollectPoint } from '@/types'
 import GeoPointForm from '@/components/common/GeoPointForm.vue'
+import SegmentPanel from '@/components/common/SegmentPanel.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { pointStore } from '@/stores/pointStore'
 import { recordStore } from '@/stores/recordStore'
+import { segmentStore } from '@/stores/segmentStore'
 import { uid } from '@/utils/id'
 
 const pointState = useStore(pointStore)
 const recordState = useStore(recordStore)
+const segmentState = useStore(segmentStore)
 
 const editingId = ref<string | null>(null)
 const draft = reactive<CollectPoint>({
@@ -99,7 +102,15 @@ async function remove(point: CollectPoint): Promise<void> {
     ElMessage.error(`「${point.name}」下仍有 ${count} 条菌物条目，请先清理条目`)
     return
   }
+  const liveSegments = segmentState.segments.filter(
+    (seg) => seg.pointId === point.id && seg.status !== 'returned'
+  )
+  if (liveSegments.length > 0) {
+    ElMessage.error(`「${point.name}」下仍有 ${liveSegments.length} 个编号段未退回，请先停用或整段退回`)
+    return
+  }
   await ElMessageBox.confirm(`确认删除采集点「${point.name}」？`, '删除确认', { type: 'warning' })
+  await segmentStore.getState().removeByPoint(point.id)
   await pointStore.getState().remove(point.id)
   ElMessage.success('采集点已删除')
 }
@@ -111,7 +122,7 @@ async function remove(point: CollectPoint): Promise<void> {
       <div>
         <h2 class="page-title">采集点管理</h2>
         <p class="page-sub">
-          经纬度与海拔表单带格式校验；每个采集点展示条目数与主要基物，删除前校验下级条目数。
+          经纬度与海拔表单带格式校验；每个采集点可登记编号段，新条目按段内顺序领号，卡片实时显示领用进度。
         </p>
       </div>
       <el-button @click="resetDraft">清空表单</el-button>
@@ -144,6 +155,7 @@ async function remove(point: CollectPoint): Promise<void> {
           <el-descriptions-item label="采集日期">{{ point.collectDate }}</el-descriptions-item>
           <el-descriptions-item label="采集人">{{ point.collector || '—' }}</el-descriptions-item>
         </el-descriptions>
+        <SegmentPanel :point-id="point.id" />
         <div class="point-actions">
           <el-button size="small" @click="edit(point)">编辑</el-button>
           <el-button size="small" type="danger" plain @click="remove(point)">删除</el-button>

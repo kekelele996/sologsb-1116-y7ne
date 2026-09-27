@@ -6,12 +6,14 @@ import { recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
 import { identifyStore } from '@/stores/identifyStore'
+import { segmentStore } from '@/stores/segmentStore'
 
 const route = useRoute()
 const recordState = useStore(recordStore)
 const sporeState = useStore(sporeStore)
 const pointState = useStore(pointStore)
 const identifyState = useStore(identifyStore)
+const segmentState = useStore(segmentStore)
 
 const menus = [
   { path: '/atlas', label: '图谱总览', icon: 'Grid' },
@@ -26,6 +28,7 @@ const stats = computed(() => [
   { label: '条目', value: recordState.records.length },
   { label: '孢子印', value: sporeState.spores.length },
   { label: '采集点', value: pointState.points.length },
+  { label: '编号段', value: segmentState.segments.length },
   { label: '鉴定留痕', value: identifyState.logs.length }
 ])
 
@@ -33,6 +36,7 @@ onMounted(async () => {
   await recordStore.getState().hydrate()
   await sporeStore.getState().hydrate()
   await pointStore.getState().hydrate()
+  await segmentStore.getState().hydrate()
   await identifyStore.getState().hydrate()
 })
 </script>
