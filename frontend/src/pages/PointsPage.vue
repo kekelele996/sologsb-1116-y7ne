@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { CollectPoint } from '@/types'
+import type { CodeRange, CollectPoint } from '@/types'
 import GeoPointForm from '@/components/common/GeoPointForm.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { pointStore } from '@/stores/pointStore'
 import { recordStore } from '@/stores/recordStore'
+import { codeRangeStore } from '@/stores/codeRangeStore'
+import { issuedCount, remainingCount, summarizeRanges, type RangeStats } from '@/utils/codeRange'
 import { uid } from '@/utils/id'
 
 const pointState = useStore(pointStore)
 const recordState = useStore(recordStore)
+const codeRangeState = useStore(codeRangeStore)
 
 const editingId = ref<string | null>(null)
 const draft = reactive<CollectPoint>({
@@ -103,6 +106,79 @@ async function remove(point: CollectPoint): Promise<void> {
   await pointStore.getState().remove(point.id)
   ElMessage.success('采集点已删除')
 }
+
+/* ---------- 编号段管理 ---------- */
+
+function rangesOf(pointId: string): CodeRange[] {
+  return codeRangeState.ranges.filter((range) => range.pointId === pointId)
+}
+
+function rangeStatsOf(pointId: string): RangeStats {
+  return summarizeRanges(rangesOf(pointId))
+}
+
+function progressPercent(stats: RangeStats): number {
+  return stats.total > 0 ? Math.round((stats.used / stats.total) * 100) : 0
+}
+
+/** 段状态标签：已退回 / 已停用 / 已领完 / 启用中 */
+function rangeTag(range: CodeRange): { label: string; type: 'success' | 'warning' | 'info' } {
+  if (range.status === 'returned') return { label: '已退回', type: 'info' }
+  if (range.status === 'disabled') return { label: '已停用', type: 'warning' }
+  if (range.next > range.end) return { label: '已领完', type: 'warning' }
+  return { label: '启用中', type: 'success' }
+}
+
+const rangeDialogVisible = ref(false)
+const rangeForm = reactive({ pointId: '', prefix: '', start: 1, end: 100, note: '' })
+
+const rangePointName = computed(
+  () => pointState.points.find((point) => point.id === rangeForm.pointId)?.name ?? ''
+)
+
+function openRangeDialog(point: CollectPoint): void {
+  rangeForm.pointId = point.id
+  rangeForm.prefix = ''
+  rangeForm.start = 1
+  rangeForm.end = 100
+  rangeForm.note = ''
+  rangeDialogVisible.value = true
+}
+
+async function submitRange(): Promise<void> {
+  try {
+    const range = await codeRangeStore.getState().register({ ...rangeForm })
+    rangeDialogVisible.value = false
+    ElMessage.success(`编号段 ${range.prefix}${range.start} ~ ${range.end} 已登记，可按段领号`)
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '编号段登记失败')
+  }
+}
+
+async function toggleRange(range: CodeRange): Promise<void> {
+  try {
+    const next = range.status === 'active' ? 'disabled' : 'active'
+    await codeRangeStore.getState().setStatus(range.id, next)
+    ElMessage.success(next === 'disabled' ? '编号段已停用，不再发号' : '编号段已重新启用')
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '状态变更失败')
+  }
+}
+
+async function returnRange(range: CodeRange): Promise<void> {
+  const left = remainingCount(range)
+  await ElMessageBox.confirm(
+    `将把「${range.prefix}${range.start} ~ ${range.end}」段内未用的 ${left} 个号码整段退回；已发出的 ${issuedCount(range)} 个号留痕且不回收。退回后该段不再发号，确认退回？`,
+    '整段退回',
+    { type: 'warning' }
+  )
+  try {
+    const count = await codeRangeStore.getState().returnUnused(range.id)
+    ElMessage.success(`已整段退回 ${count} 个未用号码`)
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '退回失败')
+  }
+}
 </script>
 
 <template>
@@ -111,7 +187,7 @@ async function remove(point: CollectPoint): Promise<void> {
       <div>
         <h2 class="page-title">采集点管理</h2>
         <p class="page-sub">
-          经纬度与海拔表单带格式校验；每个采集点展示条目数与主要基物，删除前校验下级条目数。
+          经纬度与海拔表单带格式校验；每个采集点展示条目数、主要基物与编号段领用进度，删除前校验下级条目数。
         </p>
       </div>
       <el-button @click="resetDraft">清空表单</el-button>
@@ -144,6 +220,50 @@ async function remove(point: CollectPoint): Promise<void> {
           <el-descriptions-item label="采集日期">{{ point.collectDate }}</el-descriptions-item>
           <el-descriptions-item label="采集人">{{ point.collector || '—' }}</el-descriptions-item>
         </el-descriptions>
+        <div class="range-block">
+          <div class="range-head">
+            <span class="range-title">编号段领用</span>
+            <el-button size="small" text type="primary" @click="openRangeDialog(point)">登记编号段</el-button>
+          </div>
+          <template v-if="rangeStatsOf(point.id).total > 0">
+            <el-progress :percentage="progressPercent(rangeStatsOf(point.id))" :stroke-width="10" />
+            <div class="range-stats muted">
+              已用 {{ rangeStatsOf(point.id).used }} / 共 {{ rangeStatsOf(point.id).total }} · 剩余
+              {{ rangeStatsOf(point.id).remaining }}
+              <template v-if="rangeStatsOf(point.id).returned > 0">
+                · 已退回 {{ rangeStatsOf(point.id).returned }}
+              </template>
+            </div>
+            <div v-for="range in rangesOf(point.id)" :key="range.id" class="range-row">
+              <div class="range-line">
+                <span class="mono">{{ range.prefix }}{{ range.start }} ~ {{ range.end }}</span>
+                <el-tag :type="rangeTag(range).type" size="small" effect="plain">{{ rangeTag(range).label }}</el-tag>
+              </div>
+              <div class="range-line">
+                <span class="muted">
+                  已发 {{ issuedCount(range) }}
+                  <template v-if="range.status === 'returned'"> · 退回 {{ range.returnedCount }}</template>
+                  <template v-else> · 剩余 {{ remainingCount(range) }}</template>
+                </span>
+                <span class="range-ops">
+                  <el-button v-if="range.status !== 'returned'" size="small" text @click="toggleRange(range)">
+                    {{ range.status === 'active' ? '停用' : '启用' }}
+                  </el-button>
+                  <el-button
+                    v-if="range.status !== 'returned' && remainingCount(range) > 0"
+                    size="small"
+                    text
+                    type="warning"
+                    @click="returnRange(range)"
+                  >
+                    整段退回
+                  </el-button>
+                </span>
+              </div>
+            </div>
+          </template>
+          <p v-else class="muted range-empty">尚未登记编号段，新建条目时需手动填写编号</p>
+        </div>
         <div class="point-actions">
           <el-button size="small" @click="edit(point)">编辑</el-button>
           <el-button size="small" type="danger" plain @click="remove(point)">删除</el-button>
@@ -151,6 +271,30 @@ async function remove(point: CollectPoint): Promise<void> {
       </el-card>
       <el-empty v-if="pointState.points.length === 0" description="暂无采集点" />
     </div>
+
+    <el-dialog v-model="rangeDialogVisible" title="登记编号段" width="480px">
+      <el-form label-width="90px">
+        <el-form-item label="采集点">
+          <el-input :model-value="rangePointName" readonly />
+        </el-form-item>
+        <el-form-item label="编号前缀" required>
+          <el-input v-model="rangeForm.prefix" placeholder="如 BHS-2026-" />
+        </el-form-item>
+        <el-form-item label="起始号" required>
+          <el-input-number v-model="rangeForm.start" :min="0" :precision="0" :controls="false" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="终止号" required>
+          <el-input-number v-model="rangeForm.end" :min="0" :precision="0" :controls="false" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="rangeForm.note" placeholder="如 春季样线标签段" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="rangeDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitRange">登记</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -177,6 +321,42 @@ async function remove(point: CollectPoint): Promise<void> {
 }
 .desc {
   margin-bottom: 10px;
+}
+.range-block {
+  border-top: 1px dashed #e8e2d6;
+  padding-top: 10px;
+  margin-bottom: 10px;
+}
+.range-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.range-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.range-stats {
+  margin: 4px 0 8px;
+}
+.range-row {
+  padding: 6px 0;
+  border-top: 1px solid #f0ebdf;
+}
+.range-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+.range-ops {
+  display: flex;
+  gap: 4px;
+}
+.range-empty {
+  margin: 0;
 }
 .point-actions {
   display: flex;

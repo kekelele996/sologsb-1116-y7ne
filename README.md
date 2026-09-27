@@ -59,13 +59,13 @@ sologsb-1116/
 │   ├── nginx.conf              # try_files 前端路由回落 + gzip
 │   ├── public/favicon.svg
 │   └── src/
-│       ├── types/              # record.ts / spore.ts / point.ts / identify.ts / index.ts
-│       ├── stores/             # recordStore / sporeStore / pointStore / identifyStore（Zustand）
+│       ├── types/              # record.ts / spore.ts / point.ts / identify.ts / codeRange.ts / index.ts
+│       ├── stores/             # recordStore / sporeStore / pointStore / identifyStore / codeRangeStore（Zustand）
 │       ├── components/common/  # SporePrintSwatch / TraitsSummary / GillAttachmentTag / GeoPointForm
 │       ├── hooks/              # usePersistentStore / useCandidateMatch
 │       ├── pages/              # AtlasPage / RecordDetailPage / PointsPage / IdentifyPage / ComparePage
 │       ├── router/index.ts
-│       └── utils/              # spore.ts / export.ts / id.ts
+│       └── utils/              # spore.ts / export.ts / id.ts / codeRange.ts
 ```
 
 ## 五、数据模型与存储
@@ -76,18 +76,21 @@ sologsb-1116/
 | SporePrint 孢子印 | 印色、印形、获取时长、观察日期、样本干湿度 | `spores` |
 | CollectPoint 采集点 | 地点名、经纬度、海拔、植被类型、基物、伴生树种、日期、采集人 | `points` |
 | IdentifyLog 鉴定结论 | 结论学名、依据、参考图鉴与页码、置信度、是否待复核、复核人 | `identifies` |
+| CodeRange 编号段 | 采集点号源：前缀、起止号、下一个待领号（只增不减）、状态（启用/停用/已退回）、退回数量 | `codeRanges` |
+| IssuedCode 已发号台账 | 已发出号码留痕：段内序号、完整编号、关联条目、在用/已作废 | `issuedCodes` |
 
 - 数据库名 `gbfungiguide`，`meta` 表保存 `schemaVersion`；
 - `version(2)` 升级迁移会为历史条目补齐「菌肉变色反应」默认值（不变色）；
+- `version(3)` 新增 `codeRanges` 与 `issuedCodes` 两张表：新建条目按段内顺序领号，已发出的号在条目作废后仍留痕、不再使用；同一前缀的范围不能重叠，停用或领完的段不再发号，未用编号可整段退回；
 - 数据仅存于浏览器本地，容器无状态、不挂载命名卷。
 
 ## 六、主要页面
 
 | 路由 | 功能 |
 | --- | --- |
-| `/atlas` | 图谱总览：网格卡片展示菌盖形态要点、孢子印色块与鉴定状态，按印色/着生方式筛选并新建条目 |
+| `/atlas` | 图谱总览：网格卡片展示菌盖形态要点、孢子印色块与鉴定状态，按印色/着生方式筛选；新建条目时从采集点编号段按顺序领号（无可用段则手动填写，且不能复用已发出的号） |
 | `/atlas/:id` | 条目详情：形态描述分区折叠、孢子印观察登记、采集点编辑（含坐标校验）、鉴定留痕 |
-| `/points` | 采集点管理：经纬度格式校验、条目数与主要基物统计、删除前校验下级条目 |
+| `/points` | 采集点管理：经纬度格式校验、条目数与主要基物统计、删除前校验下级条目；编号段登记/停用/整段退回，卡片显示已用、剩余与退回进度 |
 | `/identify` | 鉴定工作页：左侧勾选形态特征与印色，右侧实时给出候选名录排序，确认后落鉴定结论 |
 | `/compare` | 条目对比：并排最多 3 条，逐项对照菌盖/菌褶菌管/孢子印差异并高亮 |
 

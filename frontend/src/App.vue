@@ -6,6 +6,7 @@ import { recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
 import { identifyStore } from '@/stores/identifyStore'
+import { codeRangeStore } from '@/stores/codeRangeStore'
 
 const route = useRoute()
 const recordState = useStore(recordStore)
@@ -34,6 +35,7 @@ onMounted(async () => {
   await sporeStore.getState().hydrate()
   await pointStore.getState().hydrate()
   await identifyStore.getState().hydrate()
+  await codeRangeStore.getState().hydrate()
 })
 </script>
 

@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { FungusRecord, GillAttachment, SporeColor } from '@/types'
+import type { CodeRange, FungusRecord, GillAttachment, SporeColor } from '@/types'
 import {
   CAP_MARGINS,
   CAP_SHAPES,
@@ -23,6 +23,8 @@ import { recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
 import { identifyStore } from '@/stores/identifyStore'
+import { codeRangeStore } from '@/stores/codeRangeStore'
+import { formatCode, issuable, remainingCount } from '@/utils/codeRange'
 import { uid } from '@/utils/id'
 
 const router = useRouter()
@@ -30,6 +32,7 @@ const recordState = useStore(recordStore)
 const sporeState = useStore(sporeStore)
 const pointState = useStore(pointStore)
 const identifyState = useStore(identifyStore)
+const codeRangeState = useStore(codeRangeStore)
 
 const filterAttachment = ref<GillAttachment | ''>('')
 const filterColor = ref<SporeColor | ''>('')
@@ -133,6 +136,28 @@ watch(
   { immediate: true }
 )
 
+/* ---------- 编号段领号 ---------- */
+
+/** 当前采集点可领号的编号段（启用中且未领完） */
+const issuableRanges = computed<CodeRange[]>(() =>
+  codeRangeState.ranges.filter((range) => range.pointId === form.pointId && issuable(range))
+)
+const selectedRangeId = ref('')
+watch(
+  issuableRanges,
+  (list) => {
+    if (!list.some((range) => range.id === selectedRangeId.value)) {
+      selectedRangeId.value = list[0]?.id ?? ''
+    }
+  },
+  { immediate: true }
+)
+const selectedRange = computed(() => issuableRanges.value.find((range) => range.id === selectedRangeId.value) ?? null)
+/** 预览下一个待领编号（保存时才真正领取） */
+const nextCodePreview = computed(() =>
+  selectedRange.value ? formatCode(selectedRange.value.prefix, selectedRange.value.next) : ''
+)
+
 function openCreate(): void {
   form.code = `REC-${String(recordState.records.length + 1).padStart(3, '0')}`
   form.tempName = ''
@@ -141,21 +166,38 @@ function openCreate(): void {
 }
 
 async function submit(): Promise<void> {
-  if (!form.code.trim()) {
-    ElMessage.warning('请填写采集编号')
-    return
-  }
   if (!form.pointId) {
     ElMessage.warning('请选择采集点')
     return
   }
-  if (recordState.records.some((item) => item.code === form.code.trim())) {
-    ElMessage.warning(`采集编号「${form.code}」已存在，请换一个`)
-    return
+  const id = uid('rec')
+  let code = form.code.trim()
+  if (selectedRange.value) {
+    // 有可用编号段：按段内顺序领取，保存即发出，不再回收
+    try {
+      const entry = await codeRangeStore.getState().issue(selectedRange.value.id, id)
+      code = entry.code
+    } catch (err) {
+      ElMessage.error(err instanceof Error ? err.message : '领号失败')
+      return
+    }
+  } else {
+    if (!code) {
+      ElMessage.warning('请填写采集编号')
+      return
+    }
+    if (recordState.records.some((item) => item.code === code)) {
+      ElMessage.warning(`采集编号「${code}」已存在，请换一个`)
+      return
+    }
+    if (codeRangeState.issued.some((entry) => entry.code === code)) {
+      ElMessage.warning(`编号「${code}」曾发出过，按规不再重复使用`)
+      return
+    }
   }
   const record: FungusRecord = {
-    id: uid('rec'),
-    code: form.code.trim(),
+    id,
+    code,
     tempName: form.tempName.trim(),
     fruitBodyCount: Number(form.fruitBodyCount) || 1,
     pointId: form.pointId,
@@ -183,14 +225,17 @@ async function submit(): Promise<void> {
 }
 
 async function removeRecord(record: FungusRecord): Promise<void> {
-  await ElMessageBox.confirm(`确认删除条目「${record.code}」？其孢子印与鉴定留痕一并清理`, '删除确认', {
-    type: 'warning'
-  })
+  await ElMessageBox.confirm(
+    `确认删除条目「${record.code}」？其孢子印与鉴定留痕一并清理，已领编号作废且不再使用`,
+    '删除确认',
+    { type: 'warning' }
+  )
   await sporeStore.getState().removeByRecord(record.id)
   const logs = identifyState.logs.filter((item) => item.recordId === record.id)
   await Promise.all(logs.map((item) => identifyStore.getState().remove(item.id)))
+  await codeRangeStore.getState().voidByRecord(record.id)
   await recordStore.getState().remove(record.id)
-  ElMessage.success('条目已删除')
+  ElMessage.success('条目已删除，编号已作废保留')
 }
 </script>
 
@@ -283,7 +328,25 @@ async function removeRecord(record: FungusRecord): Promise<void> {
         <el-row :gutter="12">
           <el-col :span="12">
             <el-form-item label="采集编号" required>
-              <el-input v-model="form.code" placeholder="如 BHS-2026-003" />
+              <div v-if="selectedRange" class="code-issue">
+                <el-select v-model="selectedRangeId" class="range-select">
+                  <el-option
+                    v-for="range in issuableRanges"
+                    :key="range.id"
+                    :label="`${range.prefix}${range.start} ~ ${range.end}（剩余 ${remainingCount(range)}）`"
+                    :value="range.id"
+                  />
+                </el-select>
+                <el-input :model-value="nextCodePreview" readonly class="code-preview" placeholder="保存时领取" />
+              </div>
+              <el-input v-else v-model="form.code" placeholder="如 BHS-2026-003" />
+              <p class="code-hint">
+                {{
+                  selectedRange
+                    ? '保存时从编号段按顺序领取该号，已发出的号不再回收'
+                    : '该采集点暂无可用编号段，需手动填写编号'
+                }}
+              </p>
             </el-form-item>
           </el-col>
           <el-col :span="12">
@@ -467,5 +530,23 @@ async function removeRecord(record: FungusRecord): Promise<void> {
 .card-actions {
   display: flex;
   gap: 8px;
+}
+.code-issue {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.range-select {
+  flex: 1;
+}
+.code-preview {
+  width: 150px;
+}
+.code-hint {
+  margin: 4px 0 0;
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #7f8d82;
 }
 </style>

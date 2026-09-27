@@ -1,22 +1,24 @@
 import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
-import type { CollectPoint, FungusRecord, IdentifyLog, SporePrint } from '@/types'
+import type { CodeRange, CollectPoint, FungusRecord, IdentifyLog, IssuedCode, SporePrint } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 四张表 + 元数据表 */
+/** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 / 编号段 / 已发号台账 + 元数据表 */
 class FungiGuideDb extends Dexie {
   records!: Table<FungusRecord, string>
   spores!: Table<SporePrint, string>
   points!: Table<CollectPoint, string>
   identifies!: Table<IdentifyLog, string>
+  codeRanges!: Table<CodeRange, string>
+  issuedCodes!: Table<IssuedCode, string>
   meta!: Table<MetaRow, string>
 
   constructor() {
@@ -47,6 +49,16 @@ class FungiGuideDb extends Dexie {
             }
           })
       })
+    // v3：新增「编号段」与「已发号台账」两张表，支撑按段领号、停用与整段退回
+    this.version(SCHEMA_VERSION).stores({
+      records: 'id, code, pointId, attachment, capShape',
+      spores: 'id, recordId, color, observeDate',
+      points: 'id, name, substrate, vegetation',
+      identifies: 'id, recordId, conclusion, date',
+      codeRanges: 'id, pointId, prefix, status',
+      issuedCodes: 'id, rangeId, recordId, prefix',
+      meta: 'key'
+    })
   }
 }
 
@@ -245,6 +257,70 @@ export async function seedDemoData(): Promise<void> {
       needReview: false,
       reviewer: '祁野',
       date: today
+    }
+  ])
+
+  // 示例编号段：已登记段与既有条目的编号衔接（next 指向下一个待领号）
+  await db.codeRanges.bulkPut([
+    {
+      id: 'rng_bhs_2026',
+      pointId: 'pt_bhs',
+      prefix: 'BHS-2026-',
+      start: 1,
+      end: 50,
+      next: 3,
+      status: 'active',
+      returnedCount: 0,
+      createdAt: today,
+      note: '春季样线标签段'
+    },
+    {
+      id: 'rng_yls_2026',
+      pointId: 'pt_yls',
+      prefix: 'YLS-2026-',
+      start: 1,
+      end: 30,
+      next: 2,
+      status: 'active',
+      returnedCount: 0,
+      createdAt: today,
+      note: ''
+    }
+  ])
+
+  await db.issuedCodes.bulkPut([
+    {
+      id: 'isc_001',
+      rangeId: 'rng_bhs_2026',
+      pointId: 'pt_bhs',
+      prefix: 'BHS-2026-',
+      num: 1,
+      code: 'BHS-2026-001',
+      recordId: 'rec_001',
+      status: 'inuse',
+      issuedAt: today
+    },
+    {
+      id: 'isc_002',
+      rangeId: 'rng_bhs_2026',
+      pointId: 'pt_bhs',
+      prefix: 'BHS-2026-',
+      num: 2,
+      code: 'BHS-2026-002',
+      recordId: 'rec_002',
+      status: 'inuse',
+      issuedAt: today
+    },
+    {
+      id: 'isc_003',
+      rangeId: 'rng_yls_2026',
+      pointId: 'pt_yls',
+      prefix: 'YLS-2026-',
+      num: 1,
+      code: 'YLS-2026-001',
+      recordId: 'rec_003',
+      status: 'inuse',
+      issuedAt: today
     }
   ])
 }
